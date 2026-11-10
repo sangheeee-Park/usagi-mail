@@ -1,0 +1,8 @@
+{
+  "accounts": {
+    "naver": "your_id@naver.com",
+    "gmail": "your_id@gmail.com"
+  },
+  "refresh_seconds": 180,
+  "max_items": 10
+}
