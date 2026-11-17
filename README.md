@@ -10,3 +10,9 @@ Desktop widget that lists recent Naver / Gmail subjects; click to open in browse
 5. `.venv\Scripts\python setup_cred.py` and enter the app passwords (stored in Credential Manager).
 
 Passwords are stored in Windows Credential Manager (keyring), never in files.
+
+## Run / Build
+- Dev: `.venv\Scripts\python main.py`
+- Build: `.venv\Scripts\pip install pyinstaller` then `powershell -ExecutionPolicy Bypass -File build.ps1`
+  -> `dist\usagi-mail\usagi-mail.exe` (dist config.json is copied once and keeps window positions)
+- Autostart: put a `.vbs` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` that sleeps 15s then runs the exe.
