@@ -18,3 +18,22 @@ print("ok unfold")
 assert parse_item("naver", "a@naver.com", b"1 (UID 9 BODY[...] {9}", b"\r\n", {9})["unread"] is True
 assert parse_item("naver", "a@naver.com", b"1 (UID 9 BODY[...] {9}", b"\r\n", {8})["unread"] is False
 print("ok unread")
+
+# ---- usagi state logic
+from main import count_new, mood, pick_image
+
+assert mood(2, 5, True) == "new"          # new beats everything
+assert mood(0, 5, True) == "error"
+assert mood(0, 5, False) == "unread"
+assert mood(0, 0, False) == "idle"
+
+assert count_new(None, [{"uid": 9}]) == 0  # first fetch = baseline only
+assert count_new(7, [{"uid": 9}, {"uid": 8}, {"uid": 7}]) == 2
+
+files = ["a/idle_1.png", "a/idle_2.png", "a/new_1.png"]
+assert pick_image(files, "new") == "a/new_1.png"
+assert pick_image(files, "idle", exclude="a/idle_1.png") == "a/idle_2.png"
+assert pick_image(files, "error") in files[:2]  # fallback to idle, not new
+assert pick_image(["a/new_1.png"], "error") == "a/new_1.png"  # then any
+assert pick_image([], "idle") is None
+print("ok usagi")

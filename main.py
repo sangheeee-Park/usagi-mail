@@ -1,4 +1,8 @@
-"""Desktop mail widget: pinned under other windows, draggable, per-monitor-layout position."""
+"""Desktop mail widget: Usagi + speech bubble next to mail list.
+Pinned under other windows, draggable, per-monitor-layout position."""
+import glob
+import os
+import random
 import sys
 import threading
 import webbrowser
@@ -6,25 +10,129 @@ from datetime import datetime
 
 import win32con
 import win32gui
-from PyQt5.QtCore import QObject, QPoint, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QIcon, QPainter, QPen, QPixmap
-from PyQt5.QtWidgets import QAction, QApplication, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
+from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PyQt5.QtWidgets import (
+    QAction, QApplication, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget,
+)
 
-from mail import fetch_all, load_config, save_config
+from mail import BASE_DIR, fetch_all, load_config, save_config
 
 DARK_BG = QColor(20, 20, 20, 210)
 TEXT = "#E8E8E8"
 DIM = "#888888"
-ERR = "#E06666"
 FONT = "맑은 고딕"
-WIDTH = 360
+WIDTH = 360          # mail panel
+SIDE = 150           # usagi column
 NAMES = {"naver": "네이버", "gmail": "Gmail"}
 ALLOWED_URLS = ("https://mail.naver.com/", "https://mail.google.com/")
 DRAG_THRESHOLD = 5
+ASSET_DIR = os.path.join(BASE_DIR, "assets", "private")
+
+# {n}: new mail count, {u}: unread count. Edit freely.
+PHRASES = {
+    "new": ["우라! 새 메일 {n}통!", "야하! 메일 왔다!", "푸루루루! 새 메일 {n}통!"],
+    "unread": ["훙? 안 읽은 메일 {u}통", "하아… {u}통이나 남았어", "우라? 읽어줘!"],
+    "idle": ["푸루루루…", "야하~", "훙~ 조용하다"],
+    "error": ["하아?! 연결이 안 돼", "우라?! 메일함이 안 열려"],
+}
+
+
+# ---------------------------------------------------------------- pure logic (tested in test_mail.py)
+
+def mood(new_count, unread_count, has_error):
+    if new_count:
+        return "new"
+    if has_error:
+        return "error"
+    return "unread" if unread_count else "idle"
+
+
+def pick_image(files, state, exclude=None):
+    """Random '<state>_*' file; falls back to 'idle_*', then any file. None if no files."""
+    by = lambda s: [f for f in files if os.path.basename(f).startswith(s + "_")]
+    pool = by(state) or by("idle") or list(files)
+    if len(pool) > 1 and exclude in pool:
+        pool.remove(exclude)
+    return random.choice(pool) if pool else None
+
+
+def count_new(prev_max, items):
+    """Mails with UID above the previous max. prev_max None (first fetch) -> 0."""
+    if prev_max is None:
+        return 0
+    return sum(1 for it in items if it["uid"] > prev_max)
+
+
+# ---------------------------------------------------------------- image helpers
+
+def load_sprite(path, size=SIDE):
+    """Scale, then make the white background transparent (flood fill from the edges only,
+    so white inside the character, like eye highlights, is kept)."""
+    img = QImage(path).scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    img = img.convertToFormat(QImage.Format_ARGB32)
+    w, h = img.width(), img.height()
+    stack = [(x, y) for x in range(w) for y in (0, h - 1)] + [(x, y) for y in range(h) for x in (0, w - 1)]
+    seen = set()
+    while stack:
+        x, y = stack.pop()
+        if (x, y) in seen or not (0 <= x < w and 0 <= y < h):
+            continue
+        seen.add((x, y))
+        c = QColor(img.pixel(x, y))
+        if min(c.red(), c.green(), c.blue()) < 225:  # hit the outline / body
+            continue
+        img.setPixel(x, y, 0)
+        stack += [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+    return QPixmap.fromImage(img)
 
 
 class _Signals(QObject):
     fetched = pyqtSignal(dict)
+
+
+class Bubble(QWidget):
+    TAIL = 12
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedWidth(SIDE)
+        self._text = ""
+
+    def set_text(self, text):
+        self._text = text
+        fm = QFontMetrics(QFont(FONT, 10, QFont.Bold))
+        r = fm.boundingRect(0, 0, SIDE - 24, 1000, Qt.TextWordWrap, text)
+        self.setFixedHeight(r.height() + 20 + self.TAIL)
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        body = QRectF(1, 1, self.width() - 2, self.height() - self.TAIL - 2)
+        path = QPainterPath()
+        path.addRoundedRect(body, 14, 14)
+        cx = body.center().x()
+        tail = QPainterPath()
+        tail.moveTo(cx - 10, body.bottom() - 1)
+        tail.lineTo(cx, self.height() - 1)
+        tail.lineTo(cx + 10, body.bottom() - 1)
+        path = path.united(tail)
+        p.setBrush(QColor("#FFFDF5"))
+        p.setPen(QPen(QColor("#222222"), 2))
+        p.drawPath(path)
+        p.setPen(QColor("#222222"))
+        p.setFont(QFont(FONT, 10, QFont.Bold))
+        p.drawText(body.adjusted(10, 8, -10, -8), Qt.AlignCenter | Qt.TextWordWrap, self._text)
+
+
+class Panel(QWidget):
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QBrush(DARK_BG))
+        p.setPen(QPen(QColor(80, 80, 80, 180), 1))
+        p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 12, 12)
 
 
 class MailWidget(QWidget):
@@ -33,21 +141,48 @@ class MailWidget(QWidget):
         self.cfg = cfg
         self.cfg.setdefault("positions", {})
         self._data = {name: [] for name in cfg["accounts"]}  # last good items per account
+        self._max_uid = {}       # account -> highest UID seen
+        self._new_count = 0      # stays until user clicks a mail or Usagi
+        self._errors = {}
+        self._state = None
+        self._image = None
+        self._sprites = {}       # path -> QPixmap cache
         self._busy = False
         self._press_pos = None
         self._drag_offset = None
+        self.menu = None         # set by main(): same menu as tray, opened by right-click
         self._sig = _Signals()
         self._sig.fetched.connect(self._on_fetched)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnBottomHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedWidth(WIDTH)
-        self._layout = QVBoxLayout(self)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+
+        side = QVBoxLayout()
+        side.setSpacing(2)
+        side.addStretch()
+        self._bubble = Bubble()
+        side.addWidget(self._bubble)
+        self._usagi = QLabel()
+        self._usagi.setFixedWidth(SIDE)
+        self._usagi.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+        self._usagi.setCursor(Qt.PointingHandCursor)
+        self._usagi.setProperty("usagi", True)
+        side.addWidget(self._usagi)
+        root.addLayout(side)
+
+        self._panel = Panel()
+        self._panel.setFixedWidth(WIDTH)
+        root.addWidget(self._panel, 0, Qt.AlignBottom)
+        self._layout = QVBoxLayout(self._panel)
         self._layout.setContentsMargins(14, 10, 14, 10)
         self._layout.setSpacing(3)
         self._status = self._label("로딩 중...", 8, color=DIM)
-        self.menu = None  # set by main(): same menu as tray, opened by right-click
-        btn = QPushButton("↻", self)  # absolute position: survives layout rebuilds
+
+        btn = QPushButton("↻", self._panel)  # absolute position: survives layout rebuilds
         btn.setFixedSize(22, 22)
         btn.move(WIDTH - 14 - 22, 8)
         btn.setCursor(Qt.PointingHandCursor)
@@ -57,7 +192,9 @@ class MailWidget(QWidget):
             "QPushButton:hover { background: rgba(255,255,255,30); }"
         )
         btn.clicked.connect(self.refresh)
-        self._render({})
+
+        self._render()
+        self._update_usagi(force=True)
         pos = self._load_position()
         self.move(pos["x"], pos["y"])
         self.refresh()
@@ -100,14 +237,32 @@ class MailWidget(QWidget):
         super().showEvent(event)
         self._pin_to_desktop()
 
-    # ---------------------------------------------------------------- painting / UI
+    # ---------------------------------------------------------------- usagi
 
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QBrush(DARK_BG))
-        p.setPen(QPen(QColor(80, 80, 80, 180), 1))
-        p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 12, 12)
+    def _unread_count(self):
+        return sum(it["unread"] for items in self._data.values() for it in items)
+
+    def _update_usagi(self, force=False):
+        """Change image + phrase only when the state changes (or forced by click/startup)."""
+        unread = self._unread_count()
+        state = mood(self._new_count, unread, bool(self._errors))
+        if state == self._state and not force:
+            return
+        self._state = state
+        files = sorted(glob.glob(os.path.join(ASSET_DIR, "*.png")))
+        self._image = pick_image(files, state, exclude=self._image)
+        if self._image:
+            if self._image not in self._sprites:
+                self._sprites[self._image] = load_sprite(self._image)
+            self._usagi.setPixmap(self._sprites[self._image])
+        self._bubble.set_text(random.choice(PHRASES[state]).format(n=self._new_count, u=unread))
+        self.adjustSize()
+
+    def _acknowledge(self):
+        self._new_count = 0
+        self._update_usagi(force=True)
+
+    # ---------------------------------------------------------------- list UI
 
     @staticmethod
     def _label(text, size=10, bold=False, color=TEXT):
@@ -117,7 +272,7 @@ class MailWidget(QWidget):
         lb.setStyleSheet(f"color: {color}; background: transparent;")
         return lb
 
-    def _render(self, errors):
+    def _render(self):
         while self._layout.count():
             w = self._layout.takeAt(0).widget()
             if w and w is not self._status:
@@ -125,13 +280,13 @@ class MailWidget(QWidget):
         fm_width = WIDTH - 28
         for name, items in self._data.items():
             head = NAMES.get(name, name)
-            if name in errors:
+            if name in self._errors:
                 head += "  ⚠ 연결 실패"
             hl = self._label(head, 11, bold=True)
-            if name in errors:
-                hl.setToolTip(errors[name])
+            if name in self._errors:
+                hl.setToolTip(self._errors[name])
             self._layout.addWidget(hl)
-            if not items and name not in errors:
+            if not items and name not in self._errors:
                 self._layout.addWidget(self._label("  메일 없음", 9, color=DIM))
             for it in items:
                 font = QFont(FONT, 10, QFont.Bold if it["unread"] else QFont.Normal)
@@ -144,6 +299,7 @@ class MailWidget(QWidget):
                 self._layout.addWidget(lb)
             self._layout.addSpacing(6)
         self._layout.addWidget(self._status)
+        self._panel.adjustSize()
         self.adjustSize()
 
     # ---------------------------------------------------------------- data
@@ -157,14 +313,18 @@ class MailWidget(QWidget):
 
     def _on_fetched(self, result):
         self._busy = False
-        errors = {}
+        self._errors = {}
         for name, items in result.items():
             if isinstance(items, str):
-                errors[name] = items  # keep previous items
-            else:
-                self._data[name] = items
-        self._render(errors)
-        self._status.setText(f"{datetime.now():%H:%M} 기준" + ("  · 일부 실패" if errors else ""))
+                self._errors[name] = items  # keep previous items
+                continue
+            self._new_count += count_new(self._max_uid.get(name), items)
+            if items:
+                self._max_uid[name] = max(self._max_uid.get(name, 0), max(it["uid"] for it in items))
+            self._data[name] = items
+        self._render()
+        self._status.setText(f"{datetime.now():%H:%M} 기준" + ("  · 일부 실패" if self._errors else ""))
+        self._update_usagi()
         self._pin_to_desktop()
 
     # ---------------------------------------------------------------- mouse: drag vs click
@@ -195,6 +355,10 @@ class MailWidget(QWidget):
             url = child.property("url") if child else None
             if isinstance(url, str) and url.startswith(ALLOWED_URLS):
                 webbrowser.open(url)
+                self._acknowledge()
+            elif child is self._usagi:
+                self._acknowledge()
+                self.refresh()
         self._press_pos = self._drag_offset = None
         self._pin_to_desktop()
 

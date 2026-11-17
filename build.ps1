@@ -14,4 +14,10 @@ if (-not (Test-Path dist\usagi-mail\config.json)) {
   Copy-Item config.json dist\usagi-mail\config.json
 }
 
+# character images (local only, gitignored)
+if (Test-Path assets\private) {
+  New-Item -ItemType Directory -Force dist\usagi-mail\assets | Out-Null
+  Copy-Item assets\private dist\usagi-mail\assets\ -Recurse -Force
+}
+
 Write-Host "build done: dist\usagi-mail\usagi-mail.exe"
